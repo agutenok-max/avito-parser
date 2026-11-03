@@ -15,6 +15,12 @@ from urllib.parse import unquote, urljoin
 
 from bs4 import BeautifulSoup
 
+try:
+    import lxml  # noqa: F401
+    HTML_PARSER = "lxml"
+except ImportError:  # например, Android/Termux без lxml
+    HTML_PARSER = "html.parser"
+
 from config.settings import logger
 from database.models import Listing
 
@@ -105,7 +111,7 @@ class AvitoProcessor:
         """
         if not html:
             return []
-        soup = BeautifulSoup(html, 'lxml')
+        soup = BeautifulSoup(html, HTML_PARSER)
         json_items = self._parse_initial_data(soup)
 
         listings: List[Listing] = []
@@ -214,7 +220,7 @@ class AvitoProcessor:
         address_div = item_soup.select_one(
             '[data-marker="item-address"], div[class*="geo-root-"], div[class*="geo-address"]')
         if address_div is not None:
-            address_div = BeautifulSoup(str(address_div), "lxml")
+            address_div = BeautifulSoup(str(address_div), HTML_PARSER)
             for node in address_div.select('[data-marker="item-date"]'):
                 node.decompose()
             address = address_div.get_text(" ", strip=True) or None

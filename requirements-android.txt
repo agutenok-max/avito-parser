@@ -1,0 +1,8 @@
+# Зависимости для запуска на Android (Termux). Без Playwright/Chromium: на Android он не работает,
+# бот загружает страницы обычными HTTP-запросами (FETCH_MODE=http).
+pyTelegramBotAPI>=4.20,<5
+requests>=2.31,<3
+beautifulsoup4>=4.12,<5
+loguru>=0.7,<1
+python-dotenv>=1.0,<2
+tzdata>=2024.1
