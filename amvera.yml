@@ -1,0 +1,11 @@
+# Конфигурация для Amvera Cloud (российский хостинг, https://amvera.ru)
+meta:
+  environment: docker
+  toolchain:
+    name: docker
+    version: latest
+build:
+  dockerfile: Dockerfile
+run:
+  persistenceMount: /data   # постоянное хранилище: база данных и логи
+  containerPort: 8080       # health check: /health

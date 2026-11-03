@@ -7,10 +7,10 @@ if [[ "${1:-}" == "--build" ]]; then
   docker compose build
 fi
 
-docker compose up -d --build avito-parser-bot
+docker compose up -d --build avito-bot
 
 if [[ "${1:-}" == "--logs" || "${2:-}" == "--logs" ]]; then
-  docker compose logs -f --tail=100 avito-parser-bot
+  docker compose logs -f --tail=100 avito-bot
 fi
 
 

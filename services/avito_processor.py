@@ -1,127 +1,238 @@
+"""
+Извлечение объявлений из HTML страницы поиска Avito.
+
+Данные берутся из двух источников:
+1. HTML-карточки (div[data-marker="item"]) — основной источник.
+2. Встроенный JSON страницы (window.__initialData__) — если он есть,
+   из него берутся точные отметки времени (sortTimeStamp) и недостающие поля.
+"""
+import html as html_lib
+import json
+import re
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple
+from urllib.parse import unquote, urljoin
+
 from bs4 import BeautifulSoup
-from typing import List
-from database.models import Listing
+
+try:
+    import lxml  # noqa: F401
+    HTML_PARSER = "lxml"
+except ImportError:  # например, Android/Termux без lxml
+    HTML_PARSER = "html.parser"
+
 from config.settings import logger
-from urllib.parse import urljoin
+from database.models import Listing
+
+# Старый список стоп-слов из учебного проекта (используется только CLI main.py)
+LEGACY_STOP_WORDS = ['скупка', 'выкуп', 'обмен', 'trade-in', 'трейдин', 'ремонт', 'продажа']
+
+_MONTHS = {
+    "января": 1, "февраля": 2, "марта": 3, "апреля": 4, "мая": 5, "июня": 6,
+    "июля": 7, "августа": 8, "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12,
+}
+
+_ITEM_ID_RE = re.compile(r"_(\d{6,})(?:$|[/?#])")
+
+
+def item_id_from_url(url: str) -> Optional[str]:
+    """ID объявления Avito — число в конце адреса: .../nazvanie_1234567890"""
+    if not url:
+        return None
+    m = _ITEM_ID_RE.search(url)
+    return m.group(1) if m else None
+
+
+def parse_relative_date(text: str, now: datetime) -> Tuple[Optional[datetime], bool]:
+    """
+    Переводит дату с сайта («5 минут назад», «Вчера 12:30», «2 октября 14:00»)
+    в datetime. Возвращает (дата, точная_ли). Если разобрать нельзя — (None, False).
+    `now` — текущее время в часовом поясе Avito (Москва), без tzinfo.
+    """
+    if not text:
+        return None, False
+    t = text.strip().lower().replace("\xa0", " ")
+
+    if t in ("только что", "сейчас"):
+        return now, True
+
+    m = re.match(r"^(\d+|несколько)\s+(секунд\w*|минут\w*|час\w*|д(?:ень|ня|ней)|недел\w*|месяц\w*)\s+назад", t)
+    if m:
+        num = 1 if m.group(1) == "несколько" else int(m.group(1))
+        unit = m.group(2)
+        if unit.startswith("секунд"):
+            return now - timedelta(seconds=num), True
+        if unit.startswith("минут"):
+            return now - timedelta(minutes=num), True
+        if unit.startswith("час"):
+            return now - timedelta(hours=num), False
+        if unit.startswith("д"):
+            return now - timedelta(days=num), False
+        if unit.startswith("недел"):
+            return now - timedelta(weeks=num), False
+        return now - timedelta(days=30 * num), False
+
+    m = re.match(r"^(сегодня|вчера)(?:\s*,?\s*в?\s*(\d{1,2}):(\d{2}))?", t)
+    if m:
+        base = now if m.group(1) == "сегодня" else now - timedelta(days=1)
+        if m.group(2):
+            return base.replace(hour=int(m.group(2)), minute=int(m.group(3)), second=0, microsecond=0), True
+        return base.replace(hour=0, minute=0, second=0, microsecond=0), False
+
+    m = re.match(r"^(\d{1,2})\s+([а-я]+)(?:\s+(\d{4}))?(?:\s*,?\s*в?\s*(\d{1,2}):(\d{2}))?", t)
+    if m and m.group(2) in _MONTHS:
+        year = int(m.group(3)) if m.group(3) else now.year
+        try:
+            dt = datetime(year, _MONTHS[m.group(2)], int(m.group(1)))
+        except ValueError:
+            return None, False
+        if not m.group(3) and dt > now + timedelta(days=1):
+            dt = dt.replace(year=year - 1)  # «28 декабря» в январе — прошлый год
+        if m.group(4):
+            return dt.replace(hour=int(m.group(4)), minute=int(m.group(5))), True
+        return dt, False
+
+    return None, False
+
 
 class AvitoProcessor:
     """Извлекает структурированные данные из HTML-кода страницы Avito."""
 
-    def __init__(self, base_url: str):
-        self.base_url = base_url
-        # Список стоп-слов для фильтрации объявлений об услугах
-        self.stop_words = ['скупка', 'выкуп', 'обмен', 'trade-in', 'трейдин', 'ремонт', 'продажа']
+    def __init__(self, base_url: str, stop_words: Optional[List[str]] = None):
+        self.base_url = base_url or "https://www.avito.ru/"
+        # Стоп-слова для фильтрации по заголовку. По умолчанию фильтр выключен.
+        self.stop_words = [w.lower() for w in (stop_words or [])]
 
+    # ------------------------------------------------------------------ API
     def process_html(self, html: str) -> List[Listing]:
         """
-        Основной метод для парсинга HTML.
         Находит все объявления на странице и извлекает из них данные.
+        Порядок — как на странице.
         """
-        soup = BeautifulSoup(html, 'lxml')
-        listings = []
-        
-        items_container = soup.find("div", {"data-marker": "catalog-serp"})
-        if not items_container:
-            logger.warning("Основной контейнер с объявлениями ('catalog-serp') не найден.")
+        if not html:
             return []
+        soup = BeautifulSoup(html, HTML_PARSER)
+        json_items = self._parse_initial_data(soup)
 
-        items = items_container.find_all("div", {"data-marker": "item"}, recursive=False)
+        listings: List[Listing] = []
+        seen_ids = set()
+
+        container = soup.find("div", {"data-marker": "catalog-serp"})
+        if container is None:
+            logger.warning("Основной контейнер с объявлениями ('catalog-serp') не найден.")
+        items = container.find_all("div", {"data-marker": "item"}) if container else []
         logger.info(f"Найдено {len(items)} карточек объявлений на странице.")
 
         for item_soup in items:
             try:
-                # Пропускаем рекламные блоки, если они попали в выборку
                 if item_soup.find("div", {"data-marker": "promo-item"}):
                     continue
-                
                 listing = self._parse_item(item_soup)
                 if not listing or not listing.url or not listing.title:
                     continue
-
-                # НОВАЯ ЛОГИКА: Фильтрация по стоп-словам в заголовке
-                title_lower = listing.title.lower()
-                if any(word in title_lower for word in self.stop_words):
-                    logger.debug(f"Отфильтровано объявление по стоп-слову: '{listing.title}'")
+                if listing.item_id and listing.item_id in seen_ids:
                     continue
-                
+                if listing.item_id:
+                    seen_ids.add(listing.item_id)
+                    self._merge_json(listing, json_items.get(listing.item_id))
                 listings.append(listing)
-
             except Exception as e:
                 logger.error(f"Ошибка при обработке карточки объявления: {e}")
-        
-        return listings
 
-    def _get_text(self, soup: BeautifulSoup, tag: str, attrs: dict) -> str:
+        # Если HTML-карточек нет, но есть данные во встроенном JSON — используем их
+        if not listings and json_items:
+            logger.info(f"Карточки не найдены, используем встроенные данные: {len(json_items)} шт.")
+            for item_id, data in json_items.items():
+                listing = self._listing_from_json(item_id, data)
+                if listing:
+                    listings.append(listing)
+
+        return [l for l in listings if not self._is_stopped(l)]
+
+    # ------------------------------------------------------------ helpers
+    def _is_stopped(self, listing: Listing) -> bool:
+        if not self.stop_words:
+            return False
+        title_lower = (listing.title or "").lower()
+        if any(word in title_lower for word in self.stop_words):
+            logger.debug(f"Отфильтровано объявление по стоп-слову: '{listing.title}'")
+            return True
+        return False
+
+    def _get_text(self, soup: BeautifulSoup, tag: str, attrs: dict) -> Optional[str]:
         """Безопасно извлекает текст из тега."""
         element = soup.find(tag, attrs)
         if not element:
             return None
-        
         if tag == "meta":
-            return element.get('content', '').strip()
-            
-        return element.text.strip()
+            return (element.get('content') or '').strip() or None
+        return element.get_text(" ", strip=True) or None
 
     def _parse_images(self, item_soup: BeautifulSoup) -> List[str]:
-        """
-        Извлекает ссылки на изображения из карусели, выбирая самые большие.
-        """
-        images = []
-        # Находим контейнер с фото
-        gallery_container = item_soup.find('div', {'data-marker': 'item-photo'})
-        if not gallery_container:
-            return []
-            
-        # Находим все теги <img> внутри контейнера
-        img_tags = gallery_container.find_all("img")
-        
-        for img in img_tags[:3]:  # Берем только первые 3 фото, как в уроке
-            if 'srcset' in img.attrs and img['srcset']:
-                # В srcset ссылки на разные размеры, берем самую последнюю (самую большую)
-                # Пример: "... 472w, ... 636w" -> берем "636w"
-                srcset = img['srcset']
-                parts = srcset.split(',')
+        """Извлекает ссылки на изображения из карусели, выбирая самые большие."""
+        images: List[str] = []
+        gallery = (item_soup.find('div', {'data-marker': 'item-photo'})
+                   or item_soup.find(attrs={'data-marker': re.compile(r'^item-(photo|image)')})
+                   or item_soup)
+        for img in gallery.find_all("img")[:3]:
+            url = None
+            srcset = img.get('srcset')
+            if srcset:
+                parts = [p.strip() for p in srcset.split(',') if p.strip()]
                 if parts:
-                    largest_image_url = parts[-1].strip().split(' ')[0]
-                    images.append(largest_image_url)
-            elif 'src' in img.attrs:
-                 # Если нет srcset, берем src как запасной вариант
-                 images.append(img['src'])
-                 
+                    url = parts[-1].split(' ')[0]
+            if not url:
+                url = img.get('src')
+            if url and url.startswith("http") and url not in images:
+                images.append(url)
         return images
 
-    def _parse_item(self, item_soup: BeautifulSoup) -> Listing:
+    def _parse_item(self, item_soup: BeautifulSoup) -> Optional[Listing]:
         """Извлекает данные из одной карточки объявления."""
-        
         link_tag = item_soup.find("a", {"data-marker": "item-title"})
         if not link_tag or not link_tag.has_attr('href'):
             return None
 
         relative_url = link_tag['href']
-        absolute_url = urljoin(self.base_url, relative_url)
-        
-        # Заголовок извлекаем из ссылки (рабочий вариант)
-        title = link_tag.get_text(strip=True) if link_tag else None
-        price = self._get_text(item_soup, "meta", {"itemprop": "price"})
-        
-        # Ищем описание в meta теге
-        description_meta = item_soup.find("meta", {"itemprop": "description"})
-        description = description_meta.get('content', '').strip() if description_meta else None
-        
-        # ИСПРАВЛЕННЫЙ СЕЛЕКТОР: Ищет конкретный блок с геолокацией, игнорируя дату
-        address_div = item_soup.select_one('div[class*="geo-root-"]')
-        address = address_div.get_text(strip=True) if address_div else None
-        
-        # Если адрес не найден через geo-root, пробуем извлечь из URL
-        if not address and link_tag and link_tag.has_attr('href'):
-            url_parts = link_tag['href'].split('/')
-            if len(url_parts) > 1:
-                city_from_url = url_parts[1]  # Первая часть после домена
-                if city_from_url and city_from_url not in ['all', 'www']:
-                    address = city_from_url.replace('_', ' ').title()
+        absolute_url = urljoin(self.base_url, relative_url).split("?")[0]
+        title = link_tag.get('title') or link_tag.get_text(strip=True) or None
+        if title:
+            title = re.sub(r"\s+", " ", title).strip()
 
-        # Парсинг изображений из карусели
-        images = self._parse_images(item_soup)
+        price = self._get_text(item_soup, "meta", {"itemprop": "price"})
+        if price and price.isdigit():
+            price = f"{int(price):,}".replace(",", " ") + " ₽"
+        if not price:
+            price_tag = item_soup.find(attrs={"data-marker": "item-price"})
+            price = price_tag.get_text(" ", strip=True) if price_tag else None
+
+        description = self._get_text(item_soup, "meta", {"itemprop": "description"})
+        if not description:
+            desc_tag = item_soup.find(attrs={"data-marker": "item-description"}) \
+                or item_soup.select_one('div[class*="item-description"], p[class*="description"]')
+            description = desc_tag.get_text(" ", strip=True) if desc_tag else None
+
+        date_tag = item_soup.find(attrs={"data-marker": "item-date"})
+        published_text = date_tag.get_text(" ", strip=True) if date_tag else None
+
+        address = None
+        address_from_url = False
+        address_div = item_soup.select_one(
+            '[data-marker="item-address"], div[class*="geo-root-"], div[class*="geo-address"]')
+        if address_div is not None:
+            address_div = BeautifulSoup(str(address_div), HTML_PARSER)
+            for node in address_div.select('[data-marker="item-date"]'):
+                node.decompose()
+            address = address_div.get_text(" ", strip=True) or None
+            if address and published_text and address.endswith(published_text):
+                address = address[: -len(published_text)].strip(" ,") or None
+        if not address:
+            url_parts = relative_url.lstrip('/').split('/')
+            if url_parts and url_parts[0] and url_parts[0] not in ('all', 'www', 'rossiya'):
+                address = url_parts[0].replace('_', ' ').replace('-', ' ').title()
+                address_from_url = True
+
+        item_id = item_soup.get("data-item-id") or item_id_from_url(absolute_url)
 
         return Listing(
             url=absolute_url,
@@ -129,5 +240,147 @@ class AvitoProcessor:
             price=price,
             address=address,
             description=description,
-            images=images
+            images=self._parse_images(item_soup),
+            item_id=str(item_id) if item_id else None,
+            published_text=published_text,
+            address_from_url=address_from_url,
+        )
+
+    # ---------------------------------------------------- встроенный JSON
+    def _parse_initial_data(self, soup: BeautifulSoup) -> Dict[str, dict]:
+        """
+        Ищет в странице встроенный JSON с объявлениями и возвращает {id: данные}.
+        Поддерживаются оба формата Avito:
+          * <script type="mime/invalid" data-mfe-state="true">{...}</script> (актуальный)
+          * window.__initialData__ = "%7B...%7D" (старый)
+        """
+        result: Dict[str, dict] = {}
+        for script in soup.find_all("script"):
+            text = script.string or script.get_text() or ""
+            is_mfe = script.get("data-mfe-state") == "true"
+            if not is_mfe and "__initialData__" not in text and "sortTimeStamp" not in text:
+                continue
+            if "sortTimeStamp" not in text and "urlPath" not in text and "%22" not in text:
+                continue
+            for payload in self._extract_json_payloads(text):
+                self._collect_items(payload, result, depth=0)
+        return result
+
+    @staticmethod
+    def _extract_json_payloads(text: str):
+        candidates = []
+        m = re.search(r'__initialData__\s*=\s*"(.*?)"\s*;?\s*(?:window\.|$|</)', text, re.S)
+        if m:
+            candidates.append(unquote(m.group(1)))
+        stripped = text.strip()
+        if stripped.startswith("{") or stripped.startswith("["):
+            candidates.append(stripped)
+            candidates.append(html_lib.unescape(stripped))
+        for raw in candidates:
+            try:
+                yield json.loads(raw)
+                return
+            except Exception:
+                continue
+
+    def _collect_items(self, node, result: Dict[str, dict], depth: int):
+        if depth > 25:
+            return
+        if isinstance(node, dict):
+            if ("id" in node and isinstance(node.get("id"), (int, str))
+                    and ("urlPath" in node or "sortTimeStamp" in node) and "title" in node):
+                result.setdefault(str(node["id"]), node)
+            for value in node.values():
+                if isinstance(value, (dict, list)):
+                    self._collect_items(value, result, depth + 1)
+        elif isinstance(node, list):
+            for value in node:
+                if isinstance(value, (dict, list)):
+                    self._collect_items(value, result, depth + 1)
+
+    @staticmethod
+    def _json_ts(data: dict) -> Optional[int]:
+        ts = data.get("sortTimeStamp")
+        if isinstance(ts, (int, float)) and ts > 0:
+            return int(ts / 1000) if ts > 10**11 else int(ts)
+        return None
+
+    def _merge_json(self, listing: Listing, data: Optional[dict]):
+        if not data:
+            return
+        listing.published_ts = self._json_ts(data) or listing.published_ts
+        if not listing.description and isinstance(data.get("description"), str):
+            listing.description = data["description"].strip() or None
+        if not listing.images:
+            listing.images = self._json_images(data)
+        if not listing.price:
+            listing.price = self._json_price(data)
+        if not listing.address or listing.address_from_url:
+            listing.address = self._json_address(data) or listing.address
+
+    @staticmethod
+    def _json_images(data: dict) -> List[str]:
+        images: List[str] = []
+
+        def size_key(k):
+            m = re.match(r"(\d+)x(\d+)", str(k))
+            return int(m.group(1)) * int(m.group(2)) if m else 0
+
+        for img in (data.get("images") or [])[:3]:
+            if isinstance(img, dict) and img:
+                best = max(img.keys(), key=size_key)
+                if isinstance(img[best], str) and img[best].startswith("http"):
+                    images.append(img[best])
+            elif isinstance(img, str) and img.startswith("http"):
+                images.append(img)
+        gallery = data.get("gallery")
+        if not images and isinstance(gallery, dict):
+            for key in ("imageLargeUrl", "imageUrl"):
+                url = gallery.get(key)
+                if isinstance(url, str) and url.startswith("http"):
+                    images.append(url)
+                    break
+        return images
+
+    @staticmethod
+    def _json_price(data: dict) -> Optional[str]:
+        pd = data.get("priceDetailed")
+        if isinstance(pd, dict):
+            price = pd.get("fullString") or pd.get("string")
+            if price:
+                return " ".join(str(price).replace("\xa0", " ").split())
+            if pd.get("value"):
+                try:
+                    return f"{int(pd['value']):,}".replace(",", " ") + " ₽"
+                except (TypeError, ValueError):
+                    return None
+        return None
+
+    @staticmethod
+    def _json_address(data: dict) -> Optional[str]:
+        geo = data.get("geo")
+        if isinstance(geo, dict) and geo.get("formattedAddress"):
+            return geo["formattedAddress"]
+        addr = data.get("addressDetailed")
+        if isinstance(addr, dict) and addr.get("locationName"):
+            return addr["locationName"]
+        loc = data.get("location")
+        if isinstance(loc, dict) and loc.get("name"):
+            return loc["name"]
+        return None
+
+    def _listing_from_json(self, item_id: str, data: dict) -> Optional[Listing]:
+        url_path = data.get("urlPath")
+        title = data.get("title")
+        if not url_path or not title:
+            return None
+        return Listing(
+            url=urljoin("https://www.avito.ru", url_path).split("?")[0],
+            title=" ".join(str(title).split()),
+            price=self._json_price(data),
+            address=self._json_address(data),
+            description=(data.get("description") or None),
+            images=self._json_images(data),
+            item_id=str(item_id),
+            published_ts=self._json_ts(data),
         )

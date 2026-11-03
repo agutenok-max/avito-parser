@@ -5,6 +5,7 @@ from services.antibot_toolkit import antibot_toolkit
 from config.settings import settings, logger
 import json
 import os
+import random
 import time
 
 class CurlParser(BaseParser):

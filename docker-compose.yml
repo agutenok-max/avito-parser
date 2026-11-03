@@ -1,24 +1,33 @@
+# Запуск на собственном сервере (VPS):  docker compose up -d --build
 services:
+  avito-bot:
+    build: .
+    container_name: avito-bot
+    restart: unless-stopped        # автоматический перезапуск после сбоев и перезагрузки сервера
+    env_file:
+      - .env
+    environment:
+      - DATA_DIR=/data
+      - TZ=Europe/Moscow
+    volumes:
+      - ./data:/data               # база данных и логи сохраняются между перезапусками
+    shm_size: "512m"               # нужно браузеру Chromium
+    ports:
+      - "127.0.0.1:8080:8080"      # health check: curl http://127.0.0.1:8080/health
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Старый разовый CLI-парсер (main.py). Запуск: docker compose --profile cli run --rm avito-parser
   avito-parser:
     build: .
-    container_name: avito-parser-app
-    # Монтируем базу данных и логи, чтобы они не терялись при перезапуске контейнера
-    volumes:
-      - ./database:/app/database
-      - ./logs:/app/logs
-      - ./trash:/app/trash
-    # Подключаем .env файл для конфигурации
-    env_file:
-      - .env
-
-  avito-parser-bot:
-    build: .
-    container_name: avito-parser-bot
-    restart: unless-stopped
+    profiles: ["cli"]
     env_file:
       - .env
     volumes:
       - ./database:/app/database
       - ./logs:/app/logs
       - ./trash:/app/trash
-    command: python telegram_bot/bot.py
+    command: python main.py

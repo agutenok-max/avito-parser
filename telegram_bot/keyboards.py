@@ -1,75 +1,115 @@
 """
 Клавиатуры для Telegram-бота
 """
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+from typing import Dict, List
+
+from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+from telegram_bot.formatting import short
+
+INTERVAL_CHOICES = [3, 5, 10, 15, 30, 60]
 
 
-def main_menu() -> InlineKeyboardMarkup:
+def main_menu(paused: bool = False) -> InlineKeyboardMarkup:
     """Главное меню бота"""
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
-        InlineKeyboardButton("📊 Статус парсера", callback_data="status"),
-        InlineKeyboardButton("📖 Журнал объектов", callback_data="journal:1")
+        InlineKeyboardButton("➕ Добавить поиск", callback_data="add"),
+        InlineKeyboardButton("📋 Мои поиски", callback_data="list"),
     )
     markup.add(
-        InlineKeyboardButton("🚀 Запустить парсер", callback_data="run_parser"),
-        InlineKeyboardButton("🔍 Поиск", callback_data="search")
+        InlineKeyboardButton("🗑 Удалить поиск", callback_data="remove"),
+        InlineKeyboardButton("▶️ Продолжить" if paused else "⏸ Пауза",
+                             callback_data="resume" if paused else "pause"),
     )
     markup.add(
+        InlineKeyboardButton("📊 Статистика", callback_data="status"),
         InlineKeyboardButton("⚙️ Настройки", callback_data="settings"),
-        InlineKeyboardButton("📈 Статистика", callback_data="stats")
+    )
+    markup.add(
+        InlineKeyboardButton("🔄 Проверить сейчас", callback_data="check_all"),
+        InlineKeyboardButton("📖 Последние находки", callback_data="journal:0"),
     )
     return markup
 
 
-def journal_navigation(current_page: int, total_pages: int, listings: list) -> InlineKeyboardMarkup:
-    """Навигация по журналу с кнопками объектов"""
+def back_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup().add(InlineKeyboardButton("🏠 В меню", callback_data="menu"))
+
+
+def cancel_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup().add(InlineKeyboardButton("✖️ Отмена", callback_data="cancel"))
+
+
+def searches_list(searches: List[Dict]) -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=3)
+    for s in searches:
+        icon = "🟢" if s["is_active"] else "⏸"
+        markup.row(InlineKeyboardButton(f"{icon} {short(s['title'], 40)}", url=s["url"]))
+        markup.row(
+            InlineKeyboardButton("⏸ Пауза" if s["is_active"] else "▶️ Вкл.", callback_data=f"toggle:{s['id']}"),
+            InlineKeyboardButton("🔄 Проверить", callback_data=f"check:{s['id']}"),
+            InlineKeyboardButton("🗑 Удалить", callback_data=f"del:{s['id']}"),
+        )
+    markup.row(
+        InlineKeyboardButton("➕ Добавить поиск", callback_data="add"),
+        InlineKeyboardButton("🏠 В меню", callback_data="menu"),
+    )
+    return markup
+
+
+def remove_list(searches: List[Dict]) -> InlineKeyboardMarkup:
     markup = InlineKeyboardMarkup(row_width=1)
-
-    for listing in listings:
-        btn_text = f"🏠 {listing['title'][:40]}... - {listing['price']}"
-        markup.add(InlineKeyboardButton(
-            btn_text,
-            callback_data=f"view:{listing['id']}:{current_page}"
-        ))
-
-    nav_buttons = []
-    if current_page > 1:
-        nav_buttons.append(InlineKeyboardButton("⬅️", callback_data=f"journal:{current_page-1}"))
-
-    nav_buttons.append(InlineKeyboardButton(
-        f"{current_page}/{total_pages}",
-        callback_data="noop"
-    ))
-
-    if current_page < total_pages:
-        nav_buttons.append(InlineKeyboardButton("➡️", callback_data=f"journal:{current_page+1}"))
-
-    if nav_buttons:
-        markup.add(*nav_buttons)
-
+    for s in searches:
+        markup.add(InlineKeyboardButton(f"🗑 {short(s['title'], 45)}", callback_data=f"del:{s['id']}"))
     markup.add(InlineKeyboardButton("🏠 В меню", callback_data="menu"))
     return markup
 
 
-def listing_details(listing_id: int, page: int, url: str) -> InlineKeyboardMarkup:
-    """Кнопки для детальной карточки"""
-    markup = InlineKeyboardMarkup(row_width=1)
+def confirm_delete(search_id: int) -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
-        InlineKeyboardButton("🔗 Открыть на Avito", url=url),
-        InlineKeyboardButton("🔙 Назад к списку", callback_data=f"back_journal:{page}")
+        InlineKeyboardButton("✅ Да, удалить", callback_data=f"delok:{search_id}"),
+        InlineKeyboardButton("✖️ Нет", callback_data="list"),
     )
     return markup
 
 
-def settings_menu() -> InlineKeyboardMarkup:
-    """Меню настроек"""
+def settings_menu(interval: int, photos: bool) -> InlineKeyboardMarkup:
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(
-        InlineKeyboardButton("🔄 Автозапуск", callback_data="autorun_menu"),
-        InlineKeyboardButton("📝 Изменить URL", callback_data="change_url"),
-        InlineKeyboardButton("🔙 Назад", callback_data="menu")
+        InlineKeyboardButton(f"⏱ Интервал проверки: {interval} мин.", callback_data="interval"),
+        InlineKeyboardButton(f"📷 Фото в уведомлениях: {'вкл.' if photos else 'выкл.'}",
+                             callback_data="photos"),
+        InlineKeyboardButton("🏠 В меню", callback_data="menu"),
     )
     return markup
 
 
+def interval_menu(current: int) -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=3)
+    markup.add(*[
+        InlineKeyboardButton(f"{'✅ ' if m == current else ''}{m} мин.", callback_data=f"setint:{m}")
+        for m in INTERVAL_CHOICES
+    ])
+    markup.add(InlineKeyboardButton("🔙 Назад", callback_data="settings"))
+    return markup
+
+
+def listing_buttons(url: str, search_url: str = None) -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(InlineKeyboardButton("🔗 Открыть объявление", url=url))
+    return markup
+
+
+def journal_navigation(offset: int, page_size: int, has_more: bool) -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=2)
+    nav = []
+    if offset > 0:
+        nav.append(InlineKeyboardButton("⬅️ Новее", callback_data=f"journal:{max(0, offset - page_size)}"))
+    if has_more:
+        nav.append(InlineKeyboardButton("Старее ➡️", callback_data=f"journal:{offset + page_size}"))
+    if nav:
+        markup.add(*nav)
+    markup.add(InlineKeyboardButton("🏠 В меню", callback_data="menu"))
+    return markup

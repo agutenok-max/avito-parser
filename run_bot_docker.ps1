@@ -10,11 +10,11 @@ if ($args -contains '--build') {
 }
 
 # Up only bot service
-docker compose up -d --build avito-parser-bot
+docker compose up -d --build avito-bot
 
 # Tail logs if requested
 if ($args -contains '--logs') {
-  docker compose logs -f --tail=100 avito-parser-bot
+  docker compose logs -f --tail=100 avito-bot
 }
 
 
