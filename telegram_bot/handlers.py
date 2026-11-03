@@ -1,8 +1,9 @@
 """
 Обработчики команд и кнопок Telegram-бота.
 """
+import threading
 import time
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from loguru import logger
 from telebot.apihelper import ApiTelegramException
@@ -10,6 +11,7 @@ from telebot.types import BotCommand
 
 from config.settings import settings
 from database.monitor_db import MonitorDB
+from services import diagnostics
 from services.url_tools import normalize_search_url, search_title_from_url
 from telegram_bot import keyboards as kb
 from telegram_bot.formatting import esc, fmt_ago, fmt_dt, publication_line, short
@@ -27,6 +29,7 @@ COMMANDS = [
     ("status", "Состояние и статистика"),
     ("interval", "Интервал проверки"),
     ("help", "Инструкция"),
+    ("diagnose", "Диагностика доступа к Avito (временно)"),
 ]
 
 HELP_TEXT = (
@@ -286,6 +289,34 @@ def register_handlers(bot, db: MonitorDB, monitor: Monitor, admin_ids: Optional[
             bot.send_message(message.chat.id, "▶️ Мониторинг возобновлён. Проверка начнётся в течение минуты.",
                              reply_markup=kb.main_menu(False))
 
+    _diag_lock = threading.Lock()
+
+    @bot.message_handler(commands=['diagnose'])
+    def cmd_diagnose(message):
+        if not guard(message):
+            return
+        if not _diag_lock.acquire(blocking=False):
+            bot.reply_to(message, "⏳ Диагностика уже выполняется, дождитесь результата.")
+            return
+        searches = db.list_searches(message.from_user.id)
+        search_url = searches[0]["url"] if searches else None
+        bot.send_message(message.chat.id, "🩺 Выполняю диагностику: по одному запросу к Avito и к сервису "
+                         "определения IP, без повторов. Это займёт до минуты…")
+
+        def _run():
+            try:
+                result = diagnostics.run_diagnostics(search_url)
+                bot.send_message(message.chat.id, diagnose_text(result), disable_web_page_preview=True,
+                                 reply_markup=kb.back_menu())
+                logger.info("Диагностика выполнена")
+            except Exception as e:
+                logger.exception(f"Ошибка диагностики: {e}")
+                bot.send_message(message.chat.id, f"❌ Диагностика не удалась: {esc(type(e).__name__)}")
+            finally:
+                _diag_lock.release()
+
+        threading.Thread(target=_run, name="diagnose", daemon=True).start()
+
     @bot.message_handler(commands=['status', 'stats'])
     def cmd_status(message):
         if guard(message):
@@ -482,6 +513,68 @@ def register_handlers(bot, db: MonitorDB, monitor: Monitor, admin_ids: Optional[
         except Exception as e:
             logger.exception(f"Ошибка обработки кнопки {data}: {e}")
             answer("Произошла ошибка, попробуйте ещё раз", alert=True)
+
+
+def _probe_lines(p) -> List[str]:
+    lines = [f"<b>{esc(p.name)}</b>", f"• Запрос: {esc(p.url)}"]
+    if p.error:
+        lines.append(f"• ❌ Ошибка соединения: {esc(p.error)}")
+        if p.elapsed is not None:
+            lines.append(f"• Время до ошибки: {p.elapsed:.2f} с")
+        return lines
+    lines += [
+        f"• HTTP-статус: <b>{p.status}</b>",
+        f"• Конечный URL: {esc(p.final_url)}" + (f" (редиректов: {p.redirects})" if p.redirects else ""),
+        f"• Время ответа: {p.elapsed:.2f} с, размер: {p.size:,} байт".replace(f"{p.size:,}", f"{p.size:,}".replace(",", " ")),
+    ]
+    if p.title:
+        lines.append(f"• Заголовок страницы: «{esc(p.title)}»")
+    if p.markers:
+        lines.append(f"• ⚠️ Признаки CAPTCHA/проверки робота: <b>да</b> — {esc(', '.join(p.markers))}")
+    else:
+        lines.append("• Признаки CAPTCHA/проверки робота: нет ✅")
+    if p.has_catalog is not None:
+        lines.append(f"• Список объявлений на странице: {'есть ✅' if p.has_catalog else 'нет ❌'}")
+    return lines
+
+
+def diagnose_text(result: Dict) -> str:
+    ip = result["ip"]
+    lines = ["🩺 <b>Диагностика доступа к Avito</b>", ""]
+    lines.append("<b>Внешний IP контейнера</b>")
+    if ip.error:
+        lines.append(f"• ❌ Не удалось определить: {esc(ip.error)}")
+    else:
+        lines.append(f"• IP: <code>{esc(ip.ip)}</code>")
+        place = ", ".join(x for x in (ip.city, ip.country) if x)
+        if place:
+            lines.append(f"• Местоположение: {esc(place)}")
+        if ip.org:
+            lines.append(f"• Сеть/провайдер: {esc(ip.org)}")
+    lines.append(f"• Прокси: {'используется (адрес скрыт)' if result.get('proxy') else 'не используется'}")
+    lines.append("")
+    lines += _probe_lines(result["home"])
+    lines.append("")
+    if result.get("search"):
+        lines += _probe_lines(result["search"])
+    else:
+        lines.append("<b>Ссылка поиска</b>\n• Сохранённых поисков нет — добавьте поиск и повторите /diagnose.")
+    lines.append("")
+
+    probes = [p for p in (result["home"], result.get("search")) if p]
+    blocked = [p for p in probes if p.error is None and (p.markers or p.status in (403, 429, 439))]
+    if any(p.error for p in probes):
+        verdict = "Есть ошибки соединения — проверьте сеть контейнера."
+    elif blocked:
+        verdict = ("Avito ограничивает доступ с этого IP (статус/признаки проверки робота). "
+                   "Бот в таком случае делает паузу; обходить проверку он не будет.")
+    elif result.get("search") and result["search"].has_catalog is False:
+        verdict = "Блокировки нет, но список объявлений на странице поиска не найден — нужна проверка разметки."
+    else:
+        verdict = "Доступ к Avito есть, страница поиска со списком объявлений получена ✅"
+    lines.append(f"<b>Итог:</b> {verdict}")
+    lines.append("<i>Cookies, заголовки и секреты не выводятся.</i>")
+    return "\n".join(lines)
 
 
 def setup_commands(bot) -> None:
