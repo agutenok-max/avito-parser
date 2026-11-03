@@ -73,6 +73,9 @@ class Settings:
     # === Мониторинг ===
     check_interval_minutes: int = field(default_factory=lambda: _env_int("CHECK_INTERVAL_MINUTES", 3))
     min_interval_minutes: int = field(default_factory=lambda: _env_int("MIN_INTERVAL_MINUTES", 2))
+    # Адаптивный интервал: когда новых объявлений долго нет, проверять реже (снижает нагрузку на Avito).
+    adaptive_interval: bool = field(default_factory=lambda: _env_bool("ADAPTIVE_INTERVAL", True))
+    adaptive_max_interval_minutes: int = field(default_factory=lambda: _env_int("ADAPTIVE_MAX_INTERVAL_MINUTES", 20))
     max_searches: int = field(default_factory=lambda: _env_int("MAX_SEARCHES", 20))
     max_notifications_per_check: int = field(
         default_factory=lambda: _env_int("MAX_NOTIFICATIONS_PER_CHECK", 10)

@@ -129,16 +129,28 @@ def register_handlers(bot, db: MonitorDB, monitor: Monitor, admin_ids: Optional[
             f"🗂 Всего объявлений в базе: {st['items_total']}",
             f"📨 Уведомлений отправлено: <b>{st['notifications_sent']}</b>",
             "",
-            f"⏱ Интервал проверки: {st['interval']} мин.",
-            f"🕒 Последняя проверка: {fmt_dt(st['last_check_at'])} ({fmt_ago(st['last_check_at'], now)})"
-            if st["last_check_at"] else "🕒 Последняя проверка: ещё не было",
         ]
+        if st.get("adaptive") and st.get("effective_interval") and st["effective_interval"] != st["interval"]:
+            lines.append(f"⏱ Интервал проверки: {st['interval']} мин. "
+                         f"(сейчас {st['effective_interval']} мин. — новых давно нет, проверяю реже)")
+        else:
+            lines.append(f"⏱ Интервал проверки: {st['interval']} мин.")
+        lines.append(
+            f"🕒 Последняя проверка: {fmt_dt(st['last_check_at'])} ({fmt_ago(st['last_check_at'], now)})"
+            if st["last_check_at"] else "🕒 Последняя проверка: ещё не было")
         if st["paused"]:
             lines.append("⏭ Следующая проверка: после снятия паузы")
         elif st["next_check_at"]:
             nxt = max(st["next_check_at"], st["blocked_until"] or 0)
             lines.append(f"⏭ Следующая проверка: {fmt_dt(nxt)} ({fmt_ago(nxt, now)})")
         lines.append(f"🔁 Всего циклов проверки: {st['checks_total']}, ограничений Avito: {st['blocks_total']}")
+        reason_text = {
+            "captcha": "проверка робота (CAPTCHA)",
+            "rate_limit": "слишком частые запросы (HTTP 429)",
+            "forbidden": "доступ с IP ограничен (HTTP 403)",
+        }.get(st.get("last_block_reason"))
+        if reason_text and st.get("blocked_until") and st["blocked_until"] > now:
+            lines.append(f"🚧 Причина последнего ограничения: {reason_text}")
         persistent = db.get("storage_persistent")
         if persistent is True:
             lines.append("💾 База данных: в постоянном хранилище ✅")

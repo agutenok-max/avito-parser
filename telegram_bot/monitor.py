@@ -15,7 +15,7 @@ from typing import Callable, Dict, List, Optional
 
 from config.settings import logger, settings
 from database.monitor_db import OLD, MonitorDB
-from services.avito_fetcher import BLOCKED, OK, AvitoFetcher
+from services.avito_fetcher import BLOCKED, EMPTY, OK, REASON_RATE_LIMIT, AvitoFetcher
 from services.avito_processor import AvitoProcessor, parse_relative_date
 from services.url_tools import page_url
 from telegram_bot.formatting import TZ, esc, fmt_dt
@@ -84,7 +84,22 @@ class Monitor:
     # ----------------------------------------------------------- settings
     @property
     def interval_minutes(self) -> int:
+        """Базовый интервал, заданный пользователем (команда /interval)."""
         return int(self.db.get("interval_minutes", settings.check_interval_minutes) or settings.check_interval_minutes)
+
+    @property
+    def effective_interval_minutes(self) -> int:
+        """
+        Фактический интервал до следующей проверки с учётом адаптации.
+        Когда новых объявлений долго нет, интервал плавно растёт (меньше нагрузки на Avito),
+        но никогда не опускается ниже заданного пользователем и не превышает лимит.
+        """
+        base = self.interval_minutes
+        if not settings.adaptive_interval:
+            return base
+        streak = int(self.db.get("idle_streak", 0) or 0)
+        factor = 1 + min(streak // 3, 2)  # 1x → 2x → 3x
+        return max(base, min(base * factor, settings.adaptive_max_interval_minutes))
 
     def set_interval(self, minutes: int) -> int:
         minutes = max(settings.min_interval_minutes, min(int(minutes), 24 * 60))
@@ -213,11 +228,21 @@ class Monitor:
             finally:
                 self.is_checking = False
                 finished = time.time()
-                interval = self.interval_minutes * 60
+                # Адаптация: считаем «простойные» циклы (без новых и без блокировок)
+                if summary["checked"]:
+                    if summary["new"] > 0 or summary["blocked"]:
+                        self.db.set("idle_streak", 0)
+                    else:
+                        self.db.incr("idle_streak")
+                eff_minutes = self.effective_interval_minutes
+                interval = eff_minutes * 60
                 jitter = random.uniform(-0.1, 0.1) * interval
                 self.db.set("last_check_at", int(finished))
                 self.db.set("last_cycle_seconds", round(finished - started, 1))
-                self.db.set("next_check_at", int(finished + interval + jitter))
+                self.db.set("effective_interval", eff_minutes)
+                # Блокировка сама выставила более поздний next_check_at — не затираем его
+                if not summary["blocked"]:
+                    self.db.set("next_check_at", int(finished + interval + jitter))
                 self.db.incr("checks_total")
             if summary["checked"]:
                 logger.info(
@@ -249,9 +274,9 @@ class Monitor:
         result = self.fetcher.fetch(search["url"])
         if result.status == BLOCKED:
             self.db.mark_check(sid, False, result.error)
-            self._on_blocked(result.error)
+            self._on_blocked(result.error, result.block_reason)
             return BLOCKED
-        if result.status != OK:
+        if result.status not in (OK, EMPTY):
             self.db.mark_check(sid, False, result.error)
             self.db.incr("checks_failed")
             logger.warning(f"Поиск #{sid}: {result.error}")
@@ -339,23 +364,28 @@ class Monitor:
         return len(pending)
 
     # ------------------------------------------------------ block/backoff
-    def _on_blocked(self, error: Optional[str]) -> None:
+    def _on_blocked(self, error: Optional[str], reason: Optional[str] = None) -> None:
         level = int(self.db.get("block_level", 0) or 0) + 1
         pause = min(settings.block_pause_minutes * (2 ** (level - 1)), settings.block_pause_max_minutes)
         until = int(time.time() + pause * 60)
         self.db.set("block_level", level)
         self.db.set("blocked_until", until)
         self.db.set("next_check_at", until)
+        self.db.set("last_block_reason", reason)
+        self.db.set("last_block_at", int(time.time()))
         self.db.incr("blocks_total")
         logger.warning(f"{error or 'Avito ограничил доступ'}. Пауза {pause} мин.")
         if level == 1 or level % 4 == 0:
+            hint = {
+                REASON_RATE_LIMIT: ("Avito ограничил частоту запросов. Помогает больший интервал "
+                                    "проверки (/interval) и меньше поисков."),
+            }.get(reason, ("Если блокировка не проходит часами — сервер находится вне России или его IP "
+                           "заблокирован Avito, см. раздел «Если Avito блокирует» в инструкции."))
             text = (
                 "⛔ <b>Avito временно ограничил доступ</b> к поиску с сервера бота.\n\n"
+                f"Причина: {esc(error or 'ограничение доступа')}.\n"
                 f"Я делаю паузу на {pause} мин. и затем попробую снова (до {fmt_dt(until)}).\n"
-                "Ничего делать не нужно — ваши поиски сохранены.\n\n"
-                "Если сообщение повторяется часто: увеличьте интервал проверки (/interval). "
-                "Если блокировка не проходит часами — сервер находится вне России или его IP "
-                "заблокирован Avito, см. раздел «Если Avito блокирует» в инструкции."
+                "Ничего делать не нужно — ваши поиски сохранены.\n\n" + hint
             )
             for admin in self._recipients():
                 try:
@@ -385,6 +415,10 @@ class Monitor:
         st.update({
             "paused": self.paused,
             "interval": self.interval_minutes,
+            "effective_interval": self.db.get("effective_interval", self.interval_minutes),
+            "adaptive": settings.adaptive_interval,
+            "idle_streak": int(self.db.get("idle_streak", 0) or 0),
+            "last_block_reason": self.db.get("last_block_reason"),
             "last_check_at": self.db.get("last_check_at"),
             "next_check_at": None if self.paused else self.db.get("next_check_at"),
             "blocked_until": self.db.get("blocked_until") or 0,
