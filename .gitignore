@@ -10,3 +10,7 @@ logs/*.log
 .idea/
 .vscode/
 .cursor/
+.env.*
+!.env.example
+data/
+.pytest_cache/

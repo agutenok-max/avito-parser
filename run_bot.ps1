@@ -12,7 +12,7 @@ if (Test-Path -Path "venv/Scripts/Activate.ps1") {
 }
 
 # Ensure required deps
-python -m pip install -q --disable-pip-version-check pyTelegramBotAPI APScheduler | Out-Null
+python -m pip install -q --disable-pip-version-check -r requirements.txt | Out-Null
 
 # UTF-8 console
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
@@ -20,6 +20,6 @@ $env:PYTHONIOENCODING = "utf-8"
 try { chcp 65001 > $null } catch { }
 
 # Run bot
-python telegram_bot/bot.py
+python -m telegram_bot.bot
 
 

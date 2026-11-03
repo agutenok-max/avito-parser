@@ -1,8 +1,11 @@
-playwright
-python-dotenv
-loguru
-beautifulsoup4
-lxml
-curl-cffi
-pyTelegramBotAPI>=4.14.0
-APScheduler>=3.10.4
+# Telegram-бот и мониторинг
+pyTelegramBotAPI>=4.20,<5
+requests>=2.31,<3
+beautifulsoup4>=4.12,<5
+lxml>=5.0
+loguru>=0.7,<1
+python-dotenv>=1.0,<2
+tzdata>=2024.1
+# Браузер (запасной способ загрузки страницы) и старый CLI-парсер
+playwright>=1.49,<2
+curl-cffi>=0.7,<1

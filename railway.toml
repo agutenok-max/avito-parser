@@ -1,0 +1,12 @@
+# Конфигурация для Railway (https://railway.com)
+# ВАЖНО: в настройках сервиса добавьте Volume с путём монтирования /data
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "python -m telegram_bot.bot"
+healthcheckPath = "/health"
+healthcheckTimeout = 300
+restartPolicyType = "ALWAYS"
+numReplicas = 1

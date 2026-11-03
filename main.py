@@ -4,7 +4,7 @@ from core.playwright_parser import PlaywrightParser
 from core.curl_parser import CurlParser
 from core.hybrid_parser import HybridParser
 from core.local_parser import LocalParser
-from services.avito_processor import AvitoProcessor
+from services.avito_processor import AvitoProcessor, LEGACY_STOP_WORDS
 from database.database_manager import db_manager
 
 def get_parser(mode: str):
@@ -47,7 +47,7 @@ def main():
             
         # 2. ОБРАБОТКА HTML И ИЗВЛЕЧЕНИЕ ДАННЫХ
         logger.info("Начало обработки HTML...")
-        processor = AvitoProcessor(base_url=settings.target_url)
+        processor = AvitoProcessor(base_url=settings.target_url, stop_words=LEGACY_STOP_WORDS)
         listings = processor.process_html(html)
         
         if not listings:

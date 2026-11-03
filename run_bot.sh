@@ -13,8 +13,8 @@ elif [[ -d ".venv" ]]; then
 fi
 
 # Ensure required deps (idempotent)
-python -m pip install -q --disable-pip-version-check pyTelegramBotAPI APScheduler >/dev/null 2>&1 || true
+python -m pip install -q --disable-pip-version-check -r requirements.txt >/dev/null 2>&1 || true
 
-exec python telegram_bot/bot.py
+exec python -m telegram_bot.bot
 
 
