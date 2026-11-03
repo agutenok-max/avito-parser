@@ -14,9 +14,10 @@ from datetime import datetime
 from typing import Callable, Dict, List, Optional
 
 from config.settings import logger, settings
-from database.monitor_db import MonitorDB
+from database.monitor_db import OLD, MonitorDB
 from services.avito_fetcher import BLOCKED, OK, AvitoFetcher
 from services.avito_processor import AvitoProcessor, parse_relative_date
+from services.url_tools import page_url
 from telegram_bot.formatting import TZ, esc, fmt_dt
 
 
@@ -30,6 +31,18 @@ class Notifier:
         raise NotImplementedError
 
 
+def estimate_ts(item: Dict, now: Optional[datetime] = None) -> Optional[int]:
+    """Точное (sortTimeStamp) или примерное («3 часа назад») время публикации."""
+    if item.get("published_ts"):
+        return int(item["published_ts"])
+    if item.get("published_text"):
+        now = now or datetime.now(TZ).replace(tzinfo=None)
+        dt, _exact = parse_relative_date(item["published_text"], now)
+        if dt is not None:
+            return int(dt.replace(tzinfo=TZ).timestamp())
+    return None
+
+
 def sort_freshest_first(items: List[Dict], now: Optional[datetime] = None) -> List[Dict]:
     """
     Сортирует объявления: самые свежие первыми.
@@ -37,14 +50,7 @@ def sort_freshest_first(items: List[Dict], now: Optional[datetime] = None) -> Li
     страницы (ссылка поиска всегда с сортировкой «по дате», s=104).
     """
     now = now or datetime.now(TZ).replace(tzinfo=None)
-    keyed = []
-    for idx, item in enumerate(items):
-        ts = item.get("published_ts")
-        if not ts and item.get("published_text"):
-            dt, _exact = parse_relative_date(item["published_text"], now)
-            if dt is not None:
-                ts = int(dt.replace(tzinfo=TZ).timestamp())
-        keyed.append((ts, idx, item))
+    keyed = [(estimate_ts(item, now), idx, item) for idx, item in enumerate(items)]
     if all(ts for ts, _, _ in keyed):
         keyed.sort(key=lambda x: (-x[0], x[1]))
     return [item for _, _, item in keyed]
@@ -229,6 +235,7 @@ class Monitor:
           строку-ошибку — другая ошибка.
         """
         sid = search["id"]
+        self.heartbeat = time.time()
         blocked_until = self.db.get("blocked_until") or 0
         if blocked_until > time.time():
             if notify_errors:
@@ -260,6 +267,7 @@ class Monitor:
         processor = AvitoProcessor(search["url"], stop_words=settings.stop_words)
         listings = processor.process_html(result.html)
         self.db.mark_check(sid, True)
+        self.heartbeat = time.time()
         logger.debug(f"Поиск #{sid}: на странице {len(listings)} объявлений ({result.method})")
 
         if not search.get("baseline_done"):
@@ -273,7 +281,35 @@ class Monitor:
             )
             return 0
 
-        self.db.save_new_items(sid, listings)
+        new_rows = self.db.save_new_items(sid, listings)
+
+        # Если на первой странице ВСЕ объявления новые (например, после долгой паузы из‑за
+        # блокировки), смотрим следующие страницы, чтобы не потерять объявления.
+        page = 1
+        page_new = list(new_rows)
+        page_ids = {l.item_id for l in listings if l.item_id}
+        while page < settings.max_pages and page_ids and len(page_new) == len(page_ids):
+            page += 1
+            self._sleep(random.uniform(2.0, 5.0))
+            extra = self.fetcher.fetch(page_url(search["url"], page))
+            if extra.status != OK:
+                break
+            page_listings = processor.process_html(extra.html)
+            page_ids = {l.item_id for l in page_listings if l.item_id}
+            page_new = self.db.save_new_items(sid, page_listings)
+            logger.info(f"Поиск #{sid}: страница {page}, новых {len(page_new)}")
+            new_rows += page_new
+
+        # Объявления, опубликованные задолго до прошлой успешной проверки, — это не новые
+        # публикации (реклама, «объявления из других городов» и т.п.). Их не присылаем.
+        if settings.skip_old_listings and new_rows:
+            reference = search.get("last_success_at") or search.get("created_at") or time.time()
+            cutoff = reference - settings.old_listing_margin_hours * 3600
+            old_ids = [r["id"] for r in new_rows if (estimate_ts(r) or cutoff) < cutoff]
+            if old_ids:
+                self.db.mark_skipped(old_ids, status=OLD)
+                logger.info(f"Поиск #{sid}: пропущено старых объявлений: {len(old_ids)}")
+
         pending = sort_freshest_first(self.db.pending_items(sid))
         if not pending:
             return 0

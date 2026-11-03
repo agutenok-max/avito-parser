@@ -27,3 +27,37 @@ def page(cards, initial=None):
 
 
 BLOCK_PAGE = "<html><head><title>Доступ ограничен: проверка безопасности</title></head><body>captcha</body></html>"
+
+
+def mfe_item(item_id, title, ts_ms, price=5000, city="moskva", category="velosipedy", images=True, promoted=False):
+    item = {
+        "id": item_id, "title": title, "urlPath": f"/{city}/{category}/{title.lower().replace(' ', '_')}_{item_id}",
+        "sortTimeStamp": ts_ms, "description": f"Описание {title}",
+        "priceDetailed": {"enabled": True, "fullString": f"{price:,}".replace(",", " ") + " ₽",
+                          "string": f"{price} ₽", "value": price, "hasValue": True},
+        "location": {"id": 637640, "name": "Москва"},
+        "geo": {"formattedAddress": "Москва, ул. Тверская, 1", "geoReferences": []},
+        "images": [{"208x156": f"https://00.img.avito.st/image/1/{item_id}.small",
+                    "636x476": f"https://00.img.avito.st/image/1/{item_id}.big"}] if images else [],
+    }
+    if promoted:
+        item["iva"] = {"DateInfoStep": [{"payload": {"vas": [{"title": "Продвинуто"}]}}]}
+    return item
+
+
+def mfe_page(items, with_cards=True):
+    """Страница в актуальном формате Avito: JSON в <script type="mime/invalid" data-mfe-state="true">."""
+    import html as html_lib
+    state = {"i18n": {"hasMessages": True}, "loaderData": {"data": {"catalog": {"items": items}}}}
+    script = (f'<script type="mime/invalid" data-mfe-state="true">'
+              f'{html_lib.escape(json.dumps(state, ensure_ascii=False))}</script>')
+    cards = ""
+    if with_cards:
+        cards = "".join(
+            f'<div data-marker="item" data-item-id="{i["id"]}">'
+            f'<a data-marker="item-title" href="{i["urlPath"]}?context=abc" title="{i["title"]}">{i["title"]}</a>'
+            f'<meta itemprop="price" content="{i["priceDetailed"]["value"]}">'
+            f'<div class="geo-root-x"><span>Москва, Тверская</span><p data-marker="item-date">Вчера</p></div>'
+            f'</div>' for i in items)
+    return (f'<html><head>{script}</head><body><div data-marker="catalog-serp">{cards}</div>'
+            f'</body></html>')

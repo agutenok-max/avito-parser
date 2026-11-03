@@ -77,6 +77,11 @@ class Settings:
     max_notifications_per_check: int = field(
         default_factory=lambda: _env_int("MAX_NOTIFICATIONS_PER_CHECK", 10)
     )
+    # Сколько страниц выдачи смотреть, если на первой ВСЕ объявления новые (чтобы ничего не потерять)
+    max_pages: int = field(default_factory=lambda: _env_int("MAX_PAGES", 2))
+    # Не присылать объявления, опубликованные задолго до последней проверки (реклама, «другие города»)
+    skip_old_listings: bool = field(default_factory=lambda: _env_bool("SKIP_OLD_LISTINGS", True))
+    old_listing_margin_hours: int = field(default_factory=lambda: _env_int("OLD_LISTING_MARGIN_HOURS", 6))
     send_photos: bool = field(default_factory=lambda: _env_bool("SEND_PHOTOS", True))
     # auto — сначала лёгкий HTTP-запрос, при неудаче браузер; http — только HTTP; browser — только браузер
     fetch_mode: str = field(default_factory=lambda: _env_str("FETCH_MODE", "auto").lower())

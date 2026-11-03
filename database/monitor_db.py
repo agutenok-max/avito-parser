@@ -21,6 +21,7 @@ PENDING = 0    # найдено, ещё не отправлено
 SENT = 1       # уведомление отправлено
 BASELINE = 2   # было на странице при добавлении поиска — не отправляем
 SKIPPED = 3    # не отправлено (превышен лимит за проверку / ошибки отправки)
+OLD = 4        # появилось в выдаче, но опубликовано давно (например, рекламное) — не отправляем
 
 MAX_SEND_ATTEMPTS = 3
 
@@ -92,6 +93,9 @@ class MonitorDB:
         directory = os.path.dirname(os.path.abspath(db_path))
         os.makedirs(directory, exist_ok=True)
         self._lock = threading.RLock()
+        # DELETE (классический журнал) надёжно работает и на сетевых томах облачных хостингов
+        mode = (os.getenv("SQLITE_JOURNAL_MODE") or "DELETE").upper()
+        self.journal_mode = mode if mode in ("DELETE", "WAL", "TRUNCATE", "PERSIST") else "DELETE"
         with self._conn() as conn:
             conn.executescript(SCHEMA)
 
@@ -103,8 +107,8 @@ class MonitorDB:
             conn.row_factory = sqlite3.Row
             try:
                 conn.execute("PRAGMA foreign_keys = ON")
-                conn.execute("PRAGMA journal_mode = WAL")
-                conn.execute("PRAGMA synchronous = NORMAL")
+                conn.execute(f"PRAGMA journal_mode = {self.journal_mode}")
+                conn.execute("PRAGMA synchronous = FULL")
                 yield conn
                 conn.commit()
             except Exception:
@@ -264,11 +268,11 @@ class MonitorDB:
                 (SKIPPED, item_row_id, MAX_SEND_ATTEMPTS),
             )
 
-    def mark_skipped(self, item_row_ids: List[int]) -> None:
+    def mark_skipped(self, item_row_ids: List[int], status: int = SKIPPED) -> None:
         if not item_row_ids:
             return
         with self._conn() as conn:
-            conn.executemany("UPDATE items SET status = ? WHERE id = ?", [(SKIPPED, i) for i in item_row_ids])
+            conn.executemany("UPDATE items SET status = ? WHERE id = ?", [(status, i) for i in item_row_ids])
 
     def recent_items(self, user_id: int, limit: int = 10, offset: int = 0) -> List[Dict]:
         with self._conn() as conn:
@@ -294,7 +298,7 @@ class MonitorDB:
             ).fetchone()
             i = conn.execute(
                 f"SELECT COUNT(*) AS total, "
-                f"COALESCE(SUM(CASE WHEN i.status != {BASELINE} THEN 1 ELSE 0 END), 0) AS new_found, "
+                f"COALESCE(SUM(CASE WHEN i.status IN ({PENDING}, {SENT}, {SKIPPED}) THEN 1 ELSE 0 END), 0) AS new_found, "
                 f"COALESCE(SUM(CASE WHEN i.found_at > ? THEN 1 ELSE 0 END), 0) AS last_day "
                 f"FROM items i JOIN searches s ON s.id = i.search_id {where}",
                 [int(time.time()) - 86400] + params,

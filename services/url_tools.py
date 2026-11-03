@@ -81,3 +81,12 @@ def search_title_from_url(url: str) -> str:
         name = f"{name} ({city.replace('_', ' ')})"
     name = name.strip() or "Поиск Avito"
     return name[:60]
+
+
+def page_url(url: str, page: int) -> str:
+    """Ссылка на страницу N результатов поиска (p=N)."""
+    parts = urlsplit(url)
+    query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != "p"]
+    if page > 1:
+        query.append(("p", str(page)))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query, doseq=True), ""))

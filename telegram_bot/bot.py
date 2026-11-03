@@ -16,6 +16,7 @@ from typing import Dict, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import requests  # noqa: E402
 import telebot  # noqa: E402
 from telebot import apihelper  # noqa: E402
 from telebot.apihelper import ApiTelegramException  # noqa: E402
@@ -61,17 +62,39 @@ class TelegramNotifier(Notifier):
         photos = bool(self.db.get("send_photos", settings.send_photos))
         image = (item.get("images") or [None])[0] if photos else None
         if image:
+            caption = notification_text(item, search["title"], with_photo=True)
+            # 1) Telegram сам скачивает фото по ссылке
             try:
-                msg = self._call(self.bot.send_photo, chat_id, image,
-                                 caption=notification_text(item, search["title"], with_photo=True),
-                                 reply_markup=markup)
+                msg = self._call(self.bot.send_photo, chat_id, image, caption=caption, reply_markup=markup)
                 return msg.message_id
             except ApiTelegramException as e:
-                logger.debug(f"Фото не отправилось ({e}), отправляю текстом")
+                logger.debug(f"Фото по ссылке не отправилось ({e.description}), загружаю файлом")
+            # 2) Скачиваем фото сами и загружаем файлом
+            data = self._download_image(image)
+            if data:
+                try:
+                    msg = self._call(self.bot.send_photo, chat_id, data, caption=caption, reply_markup=markup)
+                    return msg.message_id
+                except ApiTelegramException as e:
+                    logger.debug(f"Фото файлом не отправилось ({e.description}), отправляю текстом")
+        # 3) Без фото — обычным сообщением
         msg = self._call(self.bot.send_message, chat_id,
                          notification_text(item, search["title"], with_photo=False),
                          reply_markup=markup, disable_web_page_preview=True)
         return msg.message_id
+
+    @staticmethod
+    def _download_image(url: str) -> Optional[bytes]:
+        try:
+            resp = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"},
+                                proxies={"http": settings.proxy_url, "https": settings.proxy_url}
+                                if settings.proxy_url else None)
+            ctype = resp.headers.get("Content-Type", "")
+            if resp.status_code == 200 and ctype.startswith("image/") and 0 < len(resp.content) < 10_000_000:
+                return resp.content
+        except requests.RequestException:
+            pass
+        return None
 
     def send_text(self, chat_id: int, text: str, url_button: Optional[tuple] = None) -> None:
         markup = None
@@ -124,13 +147,51 @@ class HealthHandler(BaseHTTPRequestHandler):
 def start_health_server() -> None:
     if not settings.health_enabled:
         return
+    # Слушаем порт из настроек (PORT, по умолчанию 8080) и, на всякий случай, 8080 —
+    # он указан в amvera.yml (containerPort).
+    for port in sorted({settings.health_port, 8080}):
+        try:
+            server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
+        except OSError as e:
+            logger.warning(f"Health-check сервер не запущен на порту {port}: {e}")
+            continue
+        threading.Thread(target=server.serve_forever, name=f"health-{port}", daemon=True).start()
+        logger.info(f"Health check: http://0.0.0.0:{port}/health")
+
+
+def start_watchdog(monitor: Monitor, stale_minutes: int = 20) -> None:
+    """Если поток мониторинга завис или упал — завершаем процесс, хостинг перезапустит контейнер."""
+    def _watch():
+        while True:
+            time.sleep(60)
+            stale = time.time() - monitor.heartbeat
+            if not monitor.is_alive() or stale > stale_minutes * 60:
+                logger.error(f"Мониторинг не отвечает ({int(stale)} с). Перезапуск процесса…")
+                os._exit(1)
+    threading.Thread(target=_watch, name="watchdog", daemon=True).start()
+
+
+def check_storage() -> Dict:
+    """Проверяет, что база лежит в постоянном хранилище и туда можно писать."""
+    data_dir = os.path.abspath(settings.data_dir)
+    info = {"path": os.path.abspath(settings.db_path), "persistent": None, "writable": False}
     try:
-        server = ThreadingHTTPServer(("0.0.0.0", settings.health_port), HealthHandler)
+        os.makedirs(data_dir, exist_ok=True)
+        probe = os.path.join(data_dir, ".write_test")
+        with open(probe, "w") as f:
+            f.write("ok")
+        os.remove(probe)
+        info["writable"] = True
     except OSError as e:
-        logger.warning(f"Health-check сервер не запущен (порт {settings.health_port}): {e}")
-        return
-    threading.Thread(target=server.serve_forever, name="health", daemon=True).start()
-    logger.info(f"Health check: http://0.0.0.0:{settings.health_port}/health")
+        logger.error(f"❌ Нет доступа на запись в {data_dir}: {e}")
+    if os.getenv("AMVERA") == "1" or data_dir == "/data":
+        info["persistent"] = os.path.ismount(data_dir)
+        if not info["persistent"]:
+            logger.warning(f"⚠️ {data_dir} не является подключённым постоянным хранилищем — "
+                           "база может потеряться при пересборке. Проверьте persistenceMount в amvera.yml.")
+        else:
+            logger.info(f"Постоянное хранилище подключено: {data_dir}")
+    return info
 
 
 # -------------------------------------------------------------------- main
@@ -150,8 +211,10 @@ def main():
     if settings.proxy_url and os.getenv("TELEGRAM_USE_PROXY", "false").lower() == "true":
         apihelper.proxy = {"https": settings.proxy_url}
 
+    storage = check_storage()
     db = MonitorDB(settings.db_path)
-    logger.info(f"База данных: {os.path.abspath(settings.db_path)}")
+    db.set("storage_persistent", storage["persistent"])
+    logger.info(f"База данных: {storage['path']}")
 
     bot = telebot.TeleBot(token, parse_mode='HTML', threaded=True, num_threads=4)
     notifier = TelegramNotifier(bot, db)
@@ -175,9 +238,16 @@ def main():
             logger.warning(f"Telegram недоступен (попытка {attempt}/5): {type(e).__name__}")
         time.sleep(min(60, 5 * attempt))
 
+    # Если раньше у бота был настроен webhook, getUpdates не работает — снимаем его
+    try:
+        bot.remove_webhook()
+    except Exception as e:
+        logger.warning(f"Не удалось снять webhook: {type(e).__name__}")
+
     setup_commands(bot)
     start_health_server()
     monitor.start()
+    start_watchdog(monitor)
 
     def _shutdown(signum, frame):
         logger.info("Получен сигнал остановки, завершаю работу…")

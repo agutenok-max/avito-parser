@@ -4,7 +4,8 @@
 Вы присылаете боту ссылку на поиск Avito, а он сам проверяет её каждые несколько минут
 и присылает **только новые** объявления.
 
-> 📱 **Пошаговая инструкция по запуску с iPhone — в [DEPLOY.md](DEPLOY.md).**
+> 📱 **Пошаговая инструкция по запуску с iPhone — [IPHONE_START.md](IPHONE_START.md).**
+> Технические подробности развёртывания — [DEPLOY.md](DEPLOY.md).
 
 ## Возможности
 
@@ -46,7 +47,7 @@ telegram_bot/handlers.py   — команды и кнопки
 telegram_bot/monitor.py    — фоновые проверки, защита от дублей, пауза при блокировках
 telegram_bot/formatting.py — тексты уведомлений
 services/avito_fetcher.py  — загрузка страницы: HTTP, при неудаче — headless Chromium (Playwright)
-services/avito_processor.py— разбор выдачи Avito (HTML-карточки + встроенный JSON с датами)
+services/avito_processor.py— разбор выдачи Avito (HTML-карточки + встроенный JSON data-mfe-state с датами)
 services/url_tools.py      — проверка ссылок, сортировка по дате
 database/monitor_db.py     — SQLite: поиски, объявления, уведомления, настройки
 ```
@@ -72,6 +73,8 @@ Telegram отправка повторяется (до 3 попыток), при
 | `BLOCK_PAUSE_MINUTES` | `15` | Пауза при ограничении со стороны Avito |
 | `PROXY_URL` | — | Необязательный HTTP-прокси (`http://user:pass@host:port`) |
 | `STOP_WORDS` | — | Не присылать объявления с этими словами в заголовке |
+| `MAX_PAGES` | `2` | Проверять следующие страницы, если на первой все объявления новые |
+| `SKIP_OLD_LISTINGS` | `true` | Не присылать давно опубликованные (реклама, «из других городов») |
 | `DATA_DIR` | `data` (`/data` в Docker) | Где хранить базу и логи |
 
 Полный пример — [.env.example](.env.example).

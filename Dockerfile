@@ -25,9 +25,10 @@ RUN if [ "$INSTALL_BROWSER" = "true" ]; then \
 
 COPY . .
 
-# Постоянное хранилище: база данных и логи
+# Постоянное хранилище: база данных и логи.
+# Сам том подключает хостинг (Amvera: persistenceMount в amvera.yml, Railway: Volume,
+# docker compose: volumes). Инструкцию VOLUME не используем — Railway её запрещает.
 RUN mkdir -p /data
-VOLUME ["/data"]
 
 EXPOSE 8080
 

@@ -5,9 +5,10 @@
 * Никаких попыток обойти CAPTCHA, авторизацию или защиту Avito.
   Если сайт показывает страницу «Доступ ограничен» / капчу — возвращаем
   статус BLOCKED, а монитор делает паузу.
-* Сначала обычный HTTP-запрос (дёшево по памяти и трафику). Если он не
-  вернул страницу каталога — при FETCH_MODE=auto пробуем обычный
-  headless-браузер Chromium (Playwright), который просто открывает страницу.
+* Сначала обычный HTTP-запрос (дёшево по памяти и трафику). Если страница
+  пришла, но без списка объявлений (например, требуется JavaScript) — при
+  FETCH_MODE=auto пробуем обычный headless-браузер Chromium (Playwright).
+  При блокировке браузер не запускается: с того же IP он получит тот же отказ.
 """
 import time
 from dataclasses import dataclass
@@ -54,7 +55,7 @@ def looks_blocked(html: Optional[str], http_status: Optional[int] = None) -> boo
     if not html:
         return False
     head = html[:20000].lower()
-    if "catalog-serp" in html:
+    if "catalog-serp" in html or "sorttimestamp" in head or "sortTimeStamp" in html:
         return False
     return any(marker in head for marker in _BLOCK_MARKERS)
 
@@ -63,6 +64,8 @@ def looks_like_catalog(html: Optional[str]) -> bool:
     if not html:
         return False
     if "catalog-serp" in html or "__initialData__" in html:
+        return True
+    if "data-mfe-state" in html and "sortTimeStamp" in html:
         return True
     # Пустой результат поиска — это нормальная страница, просто без объявлений
     return "ничего не найдено" in html.lower()
@@ -88,6 +91,10 @@ class AvitoFetcher:
 
         result = self._fetch_http(url)
         if result.status == OK or self.mode == "http":
+            return result
+        # Блокировка по IP: браузер с того же адреса тоже получит отказ (проверено),
+        # поэтому не тратим память и не создаём лишнюю нагрузку на Avito.
+        if result.status == BLOCKED:
             return result
 
         # auto: пробуем браузер, если HTTP не дал каталог

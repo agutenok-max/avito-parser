@@ -6,6 +6,7 @@
 2. Встроенный JSON страницы (window.__initialData__) — если он есть,
    из него берутся точные отметки времени (sortTimeStamp) и недостающие поля.
 """
+import html as html_lib
 import json
 import re
 from datetime import datetime, timedelta
@@ -205,15 +206,25 @@ class AvitoProcessor:
                 or item_soup.select_one('div[class*="item-description"], p[class*="description"]')
             description = desc_tag.get_text(" ", strip=True) if desc_tag else None
 
-        address_div = item_soup.select_one('div[class*="geo-root-"], [data-marker="item-address"]')
-        address = address_div.get_text(" ", strip=True) if address_div else None
-        if not address:
-            url_parts = relative_url.lstrip('/').split('/')
-            if url_parts and url_parts[0] and url_parts[0] not in ('all', 'www'):
-                address = url_parts[0].replace('_', ' ').title()
-
         date_tag = item_soup.find(attrs={"data-marker": "item-date"})
         published_text = date_tag.get_text(" ", strip=True) if date_tag else None
+
+        address = None
+        address_from_url = False
+        address_div = item_soup.select_one(
+            '[data-marker="item-address"], div[class*="geo-root-"], div[class*="geo-address"]')
+        if address_div is not None:
+            address_div = BeautifulSoup(str(address_div), "lxml")
+            for node in address_div.select('[data-marker="item-date"]'):
+                node.decompose()
+            address = address_div.get_text(" ", strip=True) or None
+            if address and published_text and address.endswith(published_text):
+                address = address[: -len(published_text)].strip(" ,") or None
+        if not address:
+            url_parts = relative_url.lstrip('/').split('/')
+            if url_parts and url_parts[0] and url_parts[0] not in ('all', 'www', 'rossiya'):
+                address = url_parts[0].replace('_', ' ').replace('-', ' ').title()
+                address_from_url = True
 
         item_id = item_soup.get("data-item-id") or item_id_from_url(absolute_url)
 
@@ -226,15 +237,24 @@ class AvitoProcessor:
             images=self._parse_images(item_soup),
             item_id=str(item_id) if item_id else None,
             published_text=published_text,
+            address_from_url=address_from_url,
         )
 
     # ---------------------------------------------------- встроенный JSON
     def _parse_initial_data(self, soup: BeautifulSoup) -> Dict[str, dict]:
-        """Ищет в странице JSON с объявлениями и возвращает {id: данные}."""
+        """
+        Ищет в странице встроенный JSON с объявлениями и возвращает {id: данные}.
+        Поддерживаются оба формата Avito:
+          * <script type="mime/invalid" data-mfe-state="true">{...}</script> (актуальный)
+          * window.__initialData__ = "%7B...%7D" (старый)
+        """
         result: Dict[str, dict] = {}
         for script in soup.find_all("script"):
             text = script.string or script.get_text() or ""
-            if "__initialData__" not in text and "sortTimeStamp" not in text:
+            is_mfe = script.get("data-mfe-state") == "true"
+            if not is_mfe and "__initialData__" not in text and "sortTimeStamp" not in text:
+                continue
+            if "sortTimeStamp" not in text and "urlPath" not in text and "%22" not in text:
                 continue
             for payload in self._extract_json_payloads(text):
                 self._collect_items(payload, result, depth=0)
@@ -242,17 +262,18 @@ class AvitoProcessor:
 
     @staticmethod
     def _extract_json_payloads(text: str):
-        m = re.search(r'__initialData__\s*=\s*"(.*?)"\s*;?\s*(?:window\.|$|</)', text, re.S)
         candidates = []
+        m = re.search(r'__initialData__\s*=\s*"(.*?)"\s*;?\s*(?:window\.|$|</)', text, re.S)
         if m:
             candidates.append(unquote(m.group(1)))
-        else:
-            stripped = text.strip()
-            if stripped.startswith("{"):
-                candidates.append(stripped)
+        stripped = text.strip()
+        if stripped.startswith("{") or stripped.startswith("["):
+            candidates.append(stripped)
+            candidates.append(html_lib.unescape(stripped))
         for raw in candidates:
             try:
                 yield json.loads(raw)
+                return
             except Exception:
                 continue
 
@@ -260,7 +281,8 @@ class AvitoProcessor:
         if depth > 25:
             return
         if isinstance(node, dict):
-            if "id" in node and ("urlPath" in node or "sortTimeStamp" in node) and "title" in node:
+            if ("id" in node and isinstance(node.get("id"), (int, str))
+                    and ("urlPath" in node or "sortTimeStamp" in node) and "title" in node):
                 result.setdefault(str(node["id"]), node)
             for value in node.values():
                 if isinstance(value, (dict, list)):
@@ -285,44 +307,72 @@ class AvitoProcessor:
             listing.description = data["description"].strip() or None
         if not listing.images:
             listing.images = self._json_images(data)
+        if not listing.price:
+            listing.price = self._json_price(data)
+        if not listing.address or listing.address_from_url:
+            listing.address = self._json_address(data) or listing.address
 
     @staticmethod
     def _json_images(data: dict) -> List[str]:
-        images = []
+        images: List[str] = []
+
+        def size_key(k):
+            m = re.match(r"(\d+)x(\d+)", str(k))
+            return int(m.group(1)) * int(m.group(2)) if m else 0
+
         for img in (data.get("images") or [])[:3]:
             if isinstance(img, dict) and img:
-                # берём ссылку на самый большой размер
-                def size_key(k):
-                    m = re.match(r"(\d+)x(\d+)", str(k))
-                    return int(m.group(1)) * int(m.group(2)) if m else 0
                 best = max(img.keys(), key=size_key)
                 if isinstance(img[best], str) and img[best].startswith("http"):
                     images.append(img[best])
+            elif isinstance(img, str) and img.startswith("http"):
+                images.append(img)
+        gallery = data.get("gallery")
+        if not images and isinstance(gallery, dict):
+            for key in ("imageLargeUrl", "imageUrl"):
+                url = gallery.get(key)
+                if isinstance(url, str) and url.startswith("http"):
+                    images.append(url)
+                    break
         return images
+
+    @staticmethod
+    def _json_price(data: dict) -> Optional[str]:
+        pd = data.get("priceDetailed")
+        if isinstance(pd, dict):
+            price = pd.get("fullString") or pd.get("string")
+            if price:
+                return " ".join(str(price).replace("\xa0", " ").split())
+            if pd.get("value"):
+                try:
+                    return f"{int(pd['value']):,}".replace(",", " ") + " ₽"
+                except (TypeError, ValueError):
+                    return None
+        return None
+
+    @staticmethod
+    def _json_address(data: dict) -> Optional[str]:
+        geo = data.get("geo")
+        if isinstance(geo, dict) and geo.get("formattedAddress"):
+            return geo["formattedAddress"]
+        addr = data.get("addressDetailed")
+        if isinstance(addr, dict) and addr.get("locationName"):
+            return addr["locationName"]
+        loc = data.get("location")
+        if isinstance(loc, dict) and loc.get("name"):
+            return loc["name"]
+        return None
 
     def _listing_from_json(self, item_id: str, data: dict) -> Optional[Listing]:
         url_path = data.get("urlPath")
         title = data.get("title")
         if not url_path or not title:
             return None
-        price = None
-        pd = data.get("priceDetailed")
-        if isinstance(pd, dict):
-            price = pd.get("fullString") or pd.get("string")
-            if not price and pd.get("value"):
-                price = f"{int(pd['value']):,}".replace(",", " ") + " ₽"
-        address = None
-        loc = data.get("location")
-        if isinstance(loc, dict):
-            address = loc.get("name")
-        geo = data.get("geo")
-        if isinstance(geo, dict) and geo.get("formattedAddress"):
-            address = geo["formattedAddress"]
         return Listing(
             url=urljoin("https://www.avito.ru", url_path).split("?")[0],
-            title=str(title).strip(),
-            price=price,
-            address=address,
+            title=" ".join(str(title).split()),
+            price=self._json_price(data),
+            address=self._json_address(data),
             description=(data.get("description") or None),
             images=self._json_images(data),
             item_id=str(item_id),

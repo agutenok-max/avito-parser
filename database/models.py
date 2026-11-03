@@ -21,3 +21,4 @@ class Listing:
     item_id: Optional[str] = None             # ID объявления на Avito
     published_ts: Optional[int] = None        # Unix-время публикации/поднятия (если известно точно)
     published_text: Optional[str] = None      # Текст даты с сайта, например «3 часа назад»
+    address_from_url: bool = False            # адрес угадан по ссылке (город), а не взят со страницы

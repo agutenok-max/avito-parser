@@ -136,6 +136,11 @@ def register_handlers(bot, db: MonitorDB, monitor: Monitor, admin_ids: Optional[
             nxt = max(st["next_check_at"], st["blocked_until"] or 0)
             lines.append(f"⏭ Следующая проверка: {fmt_dt(nxt)} ({fmt_ago(nxt, now)})")
         lines.append(f"🔁 Всего циклов проверки: {st['checks_total']}, ограничений Avito: {st['blocks_total']}")
+        persistent = db.get("storage_persistent")
+        if persistent is True:
+            lines.append("💾 База данных: в постоянном хранилище ✅")
+        elif persistent is False:
+            lines.append("💾 База данных: ⚠️ постоянное хранилище НЕ подключено — данные пропадут при пересборке")
         errors = [s for s in db.list_searches(user_id) if s.get("last_error")]
         if errors:
             lines.append("\n⚠️ <b>Последние ошибки:</b>")
