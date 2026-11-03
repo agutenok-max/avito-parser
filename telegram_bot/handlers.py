@@ -396,15 +396,23 @@ def register_handlers(bot, db: MonitorDB, monitor: Monitor, admin_ids: Optional[
 
             elif data.startswith("check:"):
                 s = db.get_search(int(data.split(":")[1]))
-                if s and s["user_id"] == user_id:
+                blocked_until = db.get("blocked_until") or 0
+                if s and s["user_id"] == user_id and blocked_until > time.time():
+                    answer(f"⏳ Avito временно ограничил доступ. Проверки на паузе до {fmt_dt(int(blocked_until))}.",
+                           alert=True)
+                elif s and s["user_id"] == user_id:
                     monitor.check_now(s["id"])
                     answer("🔄 Проверяю… Новые объявления придут отдельными сообщениями.", alert=True)
                 else:
                     answer("Поиск не найден")
 
             elif data == "check_all":
+                blocked_until = db.get("blocked_until") or 0
                 if not db.list_searches(user_id, only_active=True):
                     answer("Нет активных поисков. Сначала добавьте поиск.", alert=True)
+                elif blocked_until > time.time():
+                    answer(f"⏳ Avito временно ограничил доступ. Проверки на паузе до {fmt_dt(int(blocked_until))}, "
+                           "потом бот продолжит сам.", alert=True)
                 else:
                     monitor.check_now()
                     answer("🔄 Запускаю проверку всех поисков. Новые объявления придут отдельными сообщениями.",

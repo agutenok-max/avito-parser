@@ -66,11 +66,18 @@ Amvera нужен токен, чтобы забирать код из вашег
    Если не видно нужных пунктов меню, нажмите **«аА»** в адресной строке →
    **«Запросить настольный веб-сайт»**.
 2. Нажмите на **аватар** (справа вверху) → **Settings**.
-3. В самом низу меню слева: **Developer settings** → **Personal access tokens** → **Tokens (classic)**.
-4. **Generate new token** → **Generate new token (classic)**.
-5. Note: `amvera`. Expiration: **No expiration**. Отметьте галочку **repo** (и **admin:repo_hook**).
-6. Внизу **Generate token** → **скопируйте** токен (`ghp_...`) → вставьте в Заметки.
-   Повторно GitHub его не покажет.
+3. В самом низу меню слева: **Developer settings** → **Personal access tokens** → **Fine-grained tokens**.
+4. **Generate new token**.
+5. Token name: `amvera`. Expiration: **No expiration** (или 1 год).
+6. Repository access: **Only select repositories** → выберите **avito-parser**.
+7. Permissions → **Repository permissions**:
+   - **Contents** → **Read-only**
+   - **Webhooks** → **Read and write**
+8. Внизу **Generate token** → **скопируйте** токен (`github_pat_...`) → вставьте в Заметки.
+   Повторно GitHub его не покажет. Этот токен даёт доступ только к одному репозиторию.
+
+Если Amvera не примет такой токен: **Tokens (classic)** → **Generate new token (classic)** →
+Expiration: No expiration → галочки **public_repo** и **admin:repo_hook** → **Generate token**.
 
 ---
 
@@ -105,6 +112,9 @@ Amvera нужен токен, чтобы забирать код из вашег
    «Telegram-бот мониторинга новых объявлений Avito 24/7».
 2. Внизу нажмите **Merge pull request** → **Confirm merge**.
 3. GitHub сообщит Amvera об изменениях, и начнётся сборка (5–10 минут).
+
+> Если случайно нажали Merge раньше, чем настроили вебхук (шаги 5–6), — ничего страшного:
+> напишите ассистенту «перезапусти сборку», он отправит небольшое изменение в `main`, и сборка начнётся.
 
 ---
 
